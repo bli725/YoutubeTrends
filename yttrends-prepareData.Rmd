@@ -1,0 +1,204 @@
+---
+title: "Youtube Trends Data Preprocessing"
+output: html_document
+---
+
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(DBI)
+library(RMySQL)
+library(jsonlite)
+library(RMariaDB)
+```
+
+```{r}
+#Create a local connection to MySQL database
+#Our MySQL database will be connected to Tableau Desktop for analysis
+connMar <- dbConnect(RMariaDB::MariaDB(),
+                     user = 'xxxxxxxxxx',
+                     password = 'xxxxxxxxxx',
+                     dbname = 'xxxxxxxxxx',
+                     host = 'xxxxxxxxxx')
+```
+
+```{r Importing Datasets}
+CAvideos_df <- read.csv('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/CAvideos.csv', header = TRUE, sep = ',',)
+DEvideos_df <- read.csv('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/DEvideos.csv', header = TRUE, sep = ',',)
+GBvideos_df <- read.csv('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/GBvideos.csv', header = TRUE, sep = ',',)
+FRvideos_df <- read.csv('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/FRvideos.csv', header = TRUE, sep = ',',)
+INvideos_df <- read.csv('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/INvideos.csv', header = TRUE, sep = ',',)
+JPvideos_df <- read.csv('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/JPvideos.csv', header = TRUE, sep = ',',)
+KRvideos_df <- read.csv('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/KRvideos.csv', header = TRUE, sep = ',',)
+MXvideos_df <- read.csv('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/MXvideos.csv', header = TRUE, sep = ',',)
+RUvideos_df <- read.csv('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/RUvideos.csv', header = TRUE, sep = ',',)
+USvideos_df <- read.csv('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/USvideos.csv', header = TRUE, sep = ',',)
+```
+
+```{r Add a Country Identifier Column}
+add_country_col <- function(df, countryCode) {
+  df <- df %>% mutate(country = countryCode)
+}
+
+CAvideos_df <- add_country_col(CAvideos_df, 'CA')
+DEvideos_df <- add_country_col(DEvideos_df, 'DE')
+FRvideos_df <- add_country_col(FRvideos_df, 'FR')
+GBvideos_df <- add_country_col(GBvideos_df, 'GB')
+INvideos_df <- add_country_col(INvideos_df, 'IN')
+JPvideos_df <- add_country_col(JPvideos_df, 'JP')
+KRvideos_df <- add_country_col(KRvideos_df, 'KR')
+MXvideos_df <- add_country_col(MXvideos_df, 'MX')
+RUvideos_df <- add_country_col(RUvideos_df, 'RU')
+USvideos_df <- add_country_col(USvideos_df, 'US')
+```
+
+```{r Combining dataframes}
+#Create a list of the dataframes to loop through
+dflist1 <- list(CAvideos_df, DEvideos_df, FRvideos_df, GBvideos_df, INvideos_df, JPvideos_df, KRvideos_df, MXvideos_df, RUvideos_df, USvideos_df)
+#Create the final dataframe with the first row of the first data set, first row is temporary and will be removed later
+fulldf <- read.csv('//Users//bli//Data Science//Youtube Trends//yttrends2/fulldf.csv')
+fulldf <- CAvideos_df[1,]
+
+for(i in 1:length(dflist1)) {
+  fulldf <- rbind(fulldf, dflist1[[i]])
+}
+
+fulldf <- fulldf[2:nrow(fulldf),]
+fulldf %>% head()
+```
+
+```{r Format Date Fields}
+#Date fields are currently formatted in our data frames as character columns, these need to be date column in order to be used in our analysis in Tableau
+#Trending Date field will also be used as a key when matching between our combined data frame and our tags data frame
+adjust_date <- function(df) {
+  df$trending_date <- df$trending_date %>% parse_date_time(orders = "ydm")
+  df$publish_time <- df$publish_time %>% parse_date_time("y-m-dHMS")
+  df
+}
+
+fulldf <- fulldf %>% adjust_date
+```
+
+```{r Function for Writing .csv files}
+revise_write <- function(df, foldPath, fileName) {
+  dest_file = paste(foldPath, fileName, sep='/')
+  write.csv(df, dest_file, row.names=FALSE)
+}
+```
+
+```{r Create tag dataframe}
+#Add a column to our full dataset that will hold an exploded list from the string in our tags column
+#Create a new dataframe for holding all of our tags
+fulldf1 <- fulldf %>% mutate(tag_list = list(NULL))
+full_tag_list <- list(NULL, NULL, NULL, NULL)
+
+for (i in 1:length(fulldf[,1])) {
+  #split our tags string in column 7 into each individual tag and group them in vectors
+  string_full <- fulldf[i,7]
+  split_full <- str_split(string_full, '\\|', n = 2)
+  first_word_full <- split_full[[1]][1]
+  second_half_full <- split_full[[1]][2] %>% str_split('\\|')
+  finished_vector_full <- first_word_full
+  
+  for (j in 1:length(second_half_full[[1]])) {
+    second_half_full[[1]][j] <- second_half_full[[1]][j] %>% str_replace_all('\\"', '')
+    finished_vector_full <- append(finished_vector_full, second_half_full[[1]][j])
+  }
+  
+  #Add the tag vectors to our new column in fulldf
+  fulldf1[i, 18][[1]] <- list(finished_vector_full)
+  
+  #Also add each tag as an item in our new full_tag_list next to a composite key made up of video_id, trending date, and country
+  full_tag_list[[1]] <- append(full_tag_list[[1]], rep(fulldf1[i,1], length(finished_vector_full)))
+  full_tag_list[[2]] <- append(full_tag_list[[2]], rep(fulldf1[i,2], length(finished_vector_full)))
+  full_tag_list[[3]] <- append(full_tag_list[[3]], rep(fulldf1[i,17], length(finished_vector_full)))
+  full_tag_list[[4]] <- append(full_tag_list[[4]], finished_vector_full)
+}
+full_tag_list
+```
+
+```{r Importing Category Information}
+CA_category_id_df <- fromJSON('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/CA_category_id.json', flatten = TRUE)%>%
+  as.data.frame() %>%
+  select(items.id, items.snippet.title)
+
+DE_category_id_df <- fromJSON('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/DE_category_id.json', flatten = TRUE)%>%
+  as.data.frame() %>%
+  select(items.id, items.snippet.title)
+
+FR_category_id_df <- fromJSON('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/FR_category_id.json', flatten = TRUE)%>%
+  as.data.frame() %>%
+  select(items.id, items.snippet.title)
+
+GB_category_id_df <- fromJSON('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/GB_category_id.json', flatten = TRUE)%>%
+  as.data.frame() %>%
+  select(items.id, items.snippet.title)
+
+IN_category_id_df <- fromJSON('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/IN_category_id.json', flatten = TRUE)%>%
+  as.data.frame() %>%
+  select(items.id, items.snippet.title)
+
+JP_category_id_df <- fromJSON('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/JP_category_id.json', flatten = TRUE)%>%
+  as.data.frame() %>%
+  select(items.id, items.snippet.title)
+
+KR_category_id_df <- fromJSON('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/KR_category_id.json', flatten = TRUE)%>%
+  as.data.frame() %>%
+  select(items.id, items.snippet.title)
+
+MX_category_id_df <- fromJSON('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/MX_category_id.json', flatten = TRUE)%>%
+  as.data.frame() %>%
+  select(items.id, items.snippet.title)
+
+RU_category_id_df <- fromJSON('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/RU_category_id.json', flatten = TRUE)%>%
+  as.data.frame() %>%
+  select(items.id, items.snippet.title)
+
+US_category_id_df <- fromJSON('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/US_category_id.json', flatten = TRUE)%>%
+  as.data.frame() %>%
+  select(items.id, items.snippet.title)
+```
+
+``` {r Combining Category Info}
+full_cat_list <- list(CA_category_id_df, DE_category_id_df, FR_category_id_df, GB_category_id_df, IN_category_id_df, JP_category_id_df, KR_category_id_df, MX_category_id_df, RU_category_id_df, US_category_id_df)
+
+#Create one dataframe to store all the categories with no duplicates
+full_categories <- full_cat_list[[1]]
+
+for (i in 1:length(dflist1)-1) {
+  full_categories <- union(full_categories, full_cat_list[[i+1]])
+}
+
+full_categories[,1] <- full_categories[,1] %>% sapply(as.integer)
+full_categories <- full_categories %>% arrange(items.id)
+```
+
+```{r Export dataframes}
+dest_folder = '//Users//bli//Data Science//Youtube Trends//yttrends2'
+
+#fulldf export - combined datasets
+revise_write(fulldf, dest_folder, 'fulldf.csv')
+dbWriteTable(connMar, 'fulldf', fulldf, overwrite = TRUE)
+
+#full_tag export - exploded list of tags
+full_tag_df1 <- data.frame(video_id = full_tag_df[[1]],
+                           trending_date = full_tag_df[[2]],
+                           tag = full_tag_df[[3]])
+
+full_tag_df <- read.csv('//Users//bli//Data Science//Youtube Trends//yttrends2/full_tag_df.csv')
+full_tag_df <- full_tag_df %>% adjust_date()
+revise_write(full_tag_df, dest_folder, 'full_tag_df.csv')
+dbWriteTable(connMar, 'full_tag_df', full_tag_df, overwrite = TRUE)
+
+#full_categories export - complete list of available category tags
+revise_write(full_categories, dest_folder, 'full_categories.csv')
+dbWriteTable(connMar, 'full_categories', full_categories, overwrite = TRUE)
+```
+
+
+
+
+
+
+
