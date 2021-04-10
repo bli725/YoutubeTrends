@@ -66,18 +66,43 @@ for(i in 1:length(dflist1)) {
 
 fulldf <- fulldf[2:nrow(fulldf),]
 fulldf %>% head()
+
+fulldf <- read.csv('//Users//bli//Data Science//Youtube Trends//yttrends2//fulldf.csv')
+fulldf
 ```
 
 ```{r Format Date Fields}
 #Date fields are currently formatted in our data frames as character columns, these need to be date column in order to be used in our analysis in Tableau
-#Trending Date field will also be used as a key when matching between our combined data frame and our tags data frame
-adjust_date <- function(df) {
-  df$trending_date <- df$trending_date %>% parse_date_time(orders = "ydm")
-  df$publish_time <- df$publish_time %>% parse_date_time("y-m-dHMS")
-  df
-}
+#Trending Date field along with our video_id serve as a unique identifier for each video on each day
+#Convert Trending Date field to Date datatype
+fulldf$trending_date <- ymd(fulldf$trending_date)
+```
 
-fulldf <- fulldf %>% adjust_date
+
+```{r Standardize Data}
+#Data sets are not standardized for video_id, each day that a video trends is listed as a separate observation. This gives us misleading information on video statistics.
+#Data must be filtered to the observation with latest trending date for each video since the last observation of a trending video will act as a cumulative look at how much interaction that video had.
+fulldf_lastTrendingDateOnly <- fulldf %>%
+  group_by(video_id) %>%
+  select(video_id, trending_date) %>%
+  summarise(trending_date = max(trending_date)) %>% 
+  left_join(fulldf %>% select(-country)) %>%
+  distinct() %>%
+  mutate(duplicated = duplicated(video_id)) %>%
+  filter(duplicated == FALSE)
+
+#Check to make sure there is only 1 row for each video_id
+fulldf_lastTrendingDateOnly %>% mutate(duplicated = duplicated(video_id)) %>% filter(duplicated == TRUE)
+
+#Create a separate data frame that groups by Country, this data frame will have duplicated video_ids for each country that the video was trending in but still keep only the last observation unique to each video_id and country.
+fulldf_percountry <- fulldf %>%
+  group_by(video_id, country) %>%
+  select(video_id, trending_date, country) %>%
+  summarise(trending_date = max(trending_date)) %>%
+  mutate(country_count = n()) %>%
+  left_join(fulldf) %>%
+  arrange(video_id) %>%
+  distinct()
 ```
 
 ```{r Function for Writing .csv files}
@@ -87,15 +112,15 @@ revise_write <- function(df, foldPath, fileName) {
 }
 ```
 
-```{r Create tag dataframe}
-#Add a column to our full dataset that will hold an exploded list from the string in our tags column
-#Create a new dataframe for holding all of our tags
-fulldf1 <- fulldf %>% mutate(tag_list = list(NULL))
+```{r Convert tags into list format}
+#Add a column to our full data frames that will hold an exploded list from the string in our tags column
+#Also create a large list for holding all of our tags, later to be converted into a data frame for export
+fulldf_lastTrendingDateOnly1 <- fulldf_lastTrendingDateOnly %>% mutate(tag_list = list(NULL))
 full_tag_list <- list(NULL, NULL, NULL, NULL)
 
-for (i in 1:length(fulldf[,1])) {
+for (i in 1:nrow(fulldf_lastTrendingDateOnly[,1])) {
   #split our tags string in column 7 into each individual tag and group them in vectors
-  string_full <- fulldf[i,7]
+  string_full <- fulldf_lastTrendingDateOnly[i,7]
   split_full <- str_split(string_full, '\\|', n = 2)
   first_word_full <- split_full[[1]][1]
   second_half_full <- split_full[[1]][2] %>% str_split('\\|')
@@ -106,17 +131,22 @@ for (i in 1:length(fulldf[,1])) {
     finished_vector_full <- append(finished_vector_full, second_half_full[[1]][j])
   }
   
-  #Add the tag vectors to our new column in fulldf
-  fulldf1[i, 18][[1]] <- list(finished_vector_full)
+  #Add the tag vectors to our new column in data frame that has unique video_id
+  fulldf_lastTrendingDateOnly1[i, 18][[1]] <- list(finished_vector_full)
   
-  #Also add each tag as an item in our new full_tag_list next to a composite key made up of video_id, trending date, and country
-  full_tag_list[[1]] <- append(full_tag_list[[1]], rep(fulldf1[i,1], length(finished_vector_full)))
-  full_tag_list[[2]] <- append(full_tag_list[[2]], rep(fulldf1[i,2], length(finished_vector_full)))
-  full_tag_list[[3]] <- append(full_tag_list[[3]], rep(fulldf1[i,17], length(finished_vector_full)))
-  full_tag_list[[4]] <- append(full_tag_list[[4]], finished_vector_full)
+  #Also add each tag as an item in our new full_tag_list next to video_id key
+  full_tag_list[[1]] <- append(full_tag_list[[1]], rep(fulldf_lastTrendingDateOnly1[i,1], length(finished_vector_full)))
+  full_tag_list[[2]] <- append(full_tag_list[[2]], finished_vector_full)
 }
-full_tag_list
+
+#Adds a tag list field to our fulldf_percountry data frame
+fulldf_countrytags <- fulldf_percountry %>%
+  left_join(fulldf_lastTrendingDateOnly1, by = 'video_id', suffix = c('','.y')) %>%
+  select(-trending_date.y, -title.y, -channel_title.y, -category_id.y, -publish_time.y, -tags.y, -views.y,
+         -likes.y, -dislikes.y, -comment_count.y, -thumbnail_link.y, -comments_disabled.y, -ratings_disabled.y,
+         -video_error_or_removed.y, -description.y, -duplicated)
 ```
+
 
 ```{r Importing Category Information}
 CA_category_id_df <- fromJSON('C:/Users/BLIWINDOWS2/Desktop/Youtube Trends/archive/CA_category_id.json', flatten = TRUE)%>%
@@ -177,17 +207,18 @@ full_categories <- full_categories %>% arrange(items.id)
 ```{r Export dataframes}
 dest_folder = '//Users//bli//Data Science//Youtube Trends//yttrends2'
 
-#fulldf export - combined datasets
-revise_write(fulldf, dest_folder, 'fulldf.csv')
-dbWriteTable(connMar, 'fulldf', fulldf, overwrite = TRUE)
+#Country-sorted data frame export - use for stats on individual countries
+revise_write(fulldf_countrytags %>% select(-tag_list), dest_folder, 'fulldf_countrytags.csv')
+dbWriteTable(connMar, 'fulldf_countrytags', fulldf_countrytags, overwrite = TRUE)
+
+#Unique video_id data export - use for stats on totals
+revise_write(fulldf_lastTrendingDateOnly1  %>% select(-tag_list), dest_folder, 'fulldf_lastTrendingDateOnly1.csv')
+dbWriteTable(connMar, 'fulldf_lastTrendingDateOnly1', fulldf_lastTrendingDateOnly1, overwrite = TRUE)
 
 #full_tag export - exploded list of tags
-full_tag_df1 <- data.frame(video_id = full_tag_df[[1]],
-                           trending_date = full_tag_df[[2]],
-                           tag = full_tag_df[[3]])
+full_tag_df <- data.frame(matrix(unlist(full_tag_list), ncol = 2))
+colnames(full_tag_df) <- c('video_id', 'tag')
 
-full_tag_df <- read.csv('//Users//bli//Data Science//Youtube Trends//yttrends2/full_tag_df.csv')
-full_tag_df <- full_tag_df %>% adjust_date()
 revise_write(full_tag_df, dest_folder, 'full_tag_df.csv')
 dbWriteTable(connMar, 'full_tag_df', full_tag_df, overwrite = TRUE)
 
